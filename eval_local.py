@@ -74,6 +74,7 @@ def run_single_match(agent0_info, agent1_info, max_turns: int = 1000):
             turn_count += 1
             if isinstance(obs, dict) and obs.get("is_finish"):
                 winner = obs.get("winner")
+                status = "finished_naturally"
                 break
                 
             current_player = obs.get("player", 0)
@@ -100,12 +101,18 @@ def run_single_match(agent0_info, agent1_info, max_turns: int = 1000):
             try:
                 obs = battle_select(action)
             except Exception as e:
-                # Engine exception or invalid move
+                # Engine exception or invalid move -> Active player forfeits (opponent wins)
+                winner = 1 if (current_player == 0 or current_player is None) else 0
                 status = f"engine_exception: {type(e).__name__}"
                 break
                 
+        if turn_count >= max_turns and status == "finished":
+            status = "max_turns_reached"
+            
         battle_finish()
         return {"winner": winner, "turns": turn_count, "status": status}
+
+
     finally:
         os.chdir(orig_cwd)
 
