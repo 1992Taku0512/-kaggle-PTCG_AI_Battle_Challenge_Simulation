@@ -231,6 +231,8 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pandas" },
+    { name = "python-dotenv" },
+    { name = "requests" },
     { name = "tqdm" },
 ]
 
@@ -239,6 +241,8 @@ requires-dist = [
     { name = "kaggle", specifier = ">=2.2.4" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "pandas", specifier = ">=3.0.5" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "requests", specifier = ">=2.34.2" },
     { name = "tqdm", specifier = ">=4.70.0" },
 ]
 
