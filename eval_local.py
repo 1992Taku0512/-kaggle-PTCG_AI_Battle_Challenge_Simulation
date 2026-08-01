@@ -72,15 +72,46 @@ def run_single_match(agent0_info, agent1_info, max_turns: int = 1000):
         
         while obs is not None and turn_count < max_turns:
             turn_count += 1
-            if isinstance(obs, dict) and obs.get("is_finish"):
-                winner = obs.get("winner")
+            
+            # Check match finish status from obs dict / Observation object
+            is_done = False
+            if isinstance(obs, dict):
+                if obs.get("is_finish"):
+                    winner = obs.get("winner")
+                    is_done = True
+                elif "current" in obs and isinstance(obs["current"], dict):
+                    res = obs["current"].get("result", -1)
+                    if res >= 0:
+                        winner = res
+                        is_done = True
+            else:
+                if getattr(obs, "is_finish", False):
+                    winner = getattr(obs, "winner", -1)
+                    is_done = True
+                current_obj = getattr(obs, "current", None)
+                if current_obj and hasattr(current_obj, "result") and getattr(current_obj, "result") >= 0:
+                    winner = getattr(current_obj, "result")
+                    is_done = True
+
+            if is_done:
                 status = "finished_naturally"
                 break
                 
-            current_player = obs.get("player", 0)
+            # Extract active player index (0 or 1)
+            if isinstance(obs, dict):
+                current_player = obs.get("player")
+                if current_player is None and "current" in obs and isinstance(obs["current"], dict):
+                    current_player = obs["current"].get("yourIndex", 0)
+            else:
+                current_player = getattr(obs, "player", None)
+                if current_player is None and hasattr(obs, "current") and hasattr(obs.current, "yourIndex"):
+                    current_player = getattr(obs.current, "yourIndex", 0)
             
-            # Select active agent
-            if current_player == 0 or current_player is None:
+            if current_player is None:
+                current_player = 0
+            
+            # Select active agent based on active player index
+            if current_player == 0:
                 current_agent = agent0_fn
                 current_dir = dir0
             else:
@@ -92,7 +123,7 @@ def run_single_match(agent0_info, agent1_info, max_turns: int = 1000):
                 action = current_agent(obs)
             except Exception as e:
                 # Agent code crashed
-                winner = 1 if (current_player == 0 or current_player is None) else 0
+                winner = 1 if current_player == 0 else 0
                 status = f"error_agent_{current_player}: {type(e).__name__}"
                 break
             finally:
@@ -102,7 +133,7 @@ def run_single_match(agent0_info, agent1_info, max_turns: int = 1000):
                 obs = battle_select(action)
             except Exception as e:
                 # Engine exception or invalid move -> Active player forfeits (opponent wins)
-                winner = 1 if (current_player == 0 or current_player is None) else 0
+                winner = 1 if current_player == 0 else 0
                 status = f"engine_exception: {type(e).__name__}"
                 break
                 

@@ -47,7 +47,7 @@ def load_deck_pool() -> List[List[int]]:
     return decks
 
 
-def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_size: int = 64, epochs_per_episode: int = 5):
+def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_size: int = 64, epochs_per_episode: int = 5, notify_line: bool = True):
     """Multi-Deck Multi-Opponent AlphaZero Training Pipeline on RTX 2070 SUPER GPU."""
     import random
     print("=" * 60)
@@ -72,6 +72,7 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
     print(f"Loaded {len(deck_pool)} distinct opponent 60-card decks in dev/deck_pool/")
 
     mcts_engine = AlphaZeroMCTS(model=model, encoder=encoder, num_simulations=num_simulations, device=device)
+    max_buffer_size = 5000
     experience_buffer: List[Tuple[torch.Tensor, np.ndarray, float]] = []
 
     start_time = time.time()
@@ -90,7 +91,8 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
             d0, d1 = opp_deck, my_deck
             our_player_idx = 1
         
-        print(f"\n--- Episode {episode}/{num_episodes} (Our Agent: submit003 deck | Opponent Deck Pool Sample) ---")
+        if episode % 50 == 0 or episode == 1:
+            print(f"--- Episode {episode}/{num_episodes} (Our Agent: submit003 deck | Opponent Deck Pool Sample) ---")
         
         obs_dict, _ = battle_start(d0, d1)
         episode_experiences = []
@@ -101,7 +103,6 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
             turn_count += 1
             if isinstance(obs_dict, dict) and obs_dict.get("is_finish"):
                 winner = obs_dict.get("winner", -1)
-                print(f"Match Finished! Turn {turn_count}, Winner: Player {winner}")
                 if winner == our_player_idx:
                     total_wins += 1
                 break
@@ -116,53 +117,61 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
                 state_vec = encoder.encode(obs)
 
                 # 2. MCTS Search
-                action_list, mcts_probs = mcts_engine.get_action_distribution(obs)
+                action_list, _, policy_target = mcts_engine.get_action_distribution(obs)
                 action = action_list
 
-                # Store trajectory (state_tensor, mcts_probs, player_index)
+                # Store trajectory (state_tensor, policy_target_vector, player_index)
                 episode_experiences.append({
                     "state": state_vec,
-                    "mcts_probs": mcts_probs,
+                    "policy_target": policy_target,
                     "player": current_player
                 })
 
             try:
                 obs_dict = battle_select(action)
-            except Exception as e:
-                print(f"Battle exception: {e}")
+            except Exception:
                 break
 
         # Calculate final outcome reward (+1 for winner, -1 for loser)
         winner = obs_dict.get("winner", 0) if isinstance(obs_dict, dict) else 0
         for exp in episode_experiences:
             z_reward = 1.0 if exp["player"] == winner else -1.0
-            experience_buffer.append((exp["state"], exp["mcts_probs"], z_reward))
+            experience_buffer.append((exp["state"], exp["policy_target"], z_reward))
+            if len(experience_buffer) > max_buffer_size:
+                experience_buffer.pop(0)
 
         battle_finish()
 
-        # 3. GPU Neural Network Training Step
+        # 3. GPU Neural Network Training Step (Mini-Batch Stochastic Gradient Descent)
         if len(experience_buffer) >= batch_size:
             model.train()
-            print(f"Training GPU Model on {len(experience_buffer)} samples...")
+            
+            # Sample random mini-batch from sliding replay buffer
+            sample_size = min(batch_size * 4, len(experience_buffer))
+            batch_indices = np.random.choice(len(experience_buffer), size=sample_size, replace=False)
+            sampled_exps = [experience_buffer[idx] for idx in batch_indices]
 
-            states_batch = torch.stack([exp[0] for exp in experience_buffer]).to(device)
-            values_batch = torch.tensor([[exp[2]] for exp in experience_buffer], dtype=torch.float32, device=device)
+            states_batch = torch.stack([exp[0] for exp in sampled_exps]).to(device)
+            policies_batch = torch.tensor(np.array([exp[1] for exp in sampled_exps]), dtype=torch.float32, device=device)
+            values_batch = torch.tensor([[exp[2]] for exp in sampled_exps], dtype=torch.float32, device=device)
 
             for epoch in range(epochs_per_episode):
                 optimizer.zero_grad()
                 pred_policy_logits, pred_values = model(states_batch)
 
                 loss_value = torch.mean((pred_values - values_batch) ** 2)
-                loss_total = loss_value  # Value loss optimization for AlphaZero evaluation
+                log_policy_probs = torch.log_softmax(pred_policy_logits, dim=-1)
+                loss_policy = -torch.mean(torch.sum(policies_batch * log_policy_probs, dim=-1))
+                loss_total = loss_value + loss_policy
 
                 loss_total.backward()
                 optimizer.step()
 
             model.eval()
 
-            # Save Checkpoint
-            torch.save(model.state_dict(), weights_path)
-            print(f"✅ Model weights saved to: {weights_path} | Loss: {loss_value.item():.4f}")
+            if episode % 50 == 0 or episode == num_episodes:
+                torch.save(model.state_dict(), weights_path)
+                print(f"✅ Model weights saved to: {weights_path} | Total Loss: {loss_total.item():.4f} (Val: {loss_value.item():.4f}, Pol: {loss_policy.item():.4f})")
 
     elapsed_time = time.time() - start_time
     winrate = (total_wins / num_episodes) * 100.0
@@ -173,15 +182,16 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
     print("=" * 60)
 
     # LINE Notification
-    msg = (
-        f"🤖 【PTCG AI Battle】AlphaZero DRL 学習完了通知！\n\n"
-        f"・エピソード数: {num_episodes} 試合\n"
-        f"・学習時間: {elapsed_time:.1f} 秒\n"
-        f"・モデル勝率: {winrate:.1f}%\n"
-        f"・保存ファイル: submit003/model_weights.pt\n\n"
-        f"RTX 2070 SUPER（GPU）による深層強化学習と重み更新が完了しました。"
-    )
-    send_line_notification(msg)
+    if notify_line:
+        msg = (
+            f"🤖 【PTCG AI Battle】AlphaZero DRL 学習完了通知！\n\n"
+            f"・エピソード数: {num_episodes} 試合\n"
+            f"・学習時間: {elapsed_time:.1f} 秒\n"
+            f"・モデル勝率: {winrate:.1f}%\n"
+            f"・保存ファイル: submit003/model_weights.pt\n\n"
+            f"RTX 2070 SUPER（GPU）による深層強化学習と重み更新が完了しました。"
+        )
+        send_line_notification(msg)
 
 
 if __name__ == "__main__":

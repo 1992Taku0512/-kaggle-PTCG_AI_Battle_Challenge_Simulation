@@ -37,8 +37,6 @@ graph TD
         FC1["Linear Layer + LayerNorm + ReLU (512)"]
         FC2["Residual Block 1 (512 -> 512)"]
         FC3["Residual Block 2 (512 -> 512)"]
-    end
-
     subgraph DualHead ["4. デュアルヘッド出力"]
         PolicyHead["Policy Head (方針出力)<br>Linear(512 -> Action Size)<br>→ 各行動の選択確率 (Softmax)"]
         ValueHead["Value Head (盤面評価値)<br>Linear(512 -> 1)<br>→ 盤面の勝率予測 [-1.0 ~ +1.0] (Tanh)"]
@@ -49,6 +47,14 @@ graph TD
     FC3 --> PolicyHead
     FC3 --> ValueHead
 ```
+
+### 各出力の役割と学習損失関数 (Combined AlphaZero Loss)
+1. **Policy Head（方針出力 $\mathbf{p}$）**: 今の盤面において「どの手（カードプレイ、エネ貼り、ワザ使用等）が有効か」のPrior確率を出力し、MCTSの探索効率を最適制御します。
+2. **Value Head（価値出力 $v$）**: 探索木の末端（ターン終了時など）の盤面が「どれくらい勝利に近いか（-1.0〜+1.0）」を即座に予測します。
+
+学習時は、勝敗結果 $z$ とMCTSで得られた探索分布 $\boldsymbol{\pi}$ の両方を用いて、以下の合成損失関数をGPU上で最適化します：
+
+$$\mathcal{L}_{\text{total}} = \underbrace{(v - z)^2}_{\text{Value Loss (MSE)}} - \underbrace{\sum_{a} \pi_a \log(p_a)}_{\text{Policy Loss (Cross Entropy)}}$$
 
 ### ② 1ターンの思考フロー (MCTS + NN 融合)
 

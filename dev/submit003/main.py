@@ -88,31 +88,53 @@ def agent(obs_dict: dict) -> list[int]:
                 return list(range(k))
             return []
 
-        # Boolean / Setup Decisions
+        # 1. MAIN Turn Selection -> AlphaZero MCTS Engine!
+        if sel_type == SelectType.MAIN or ctx == SelectContext.MAIN:
+            encoder, model, mcts_engine = get_agent_components()
+            action_indices, probs, _ = mcts_engine.get_action_distribution(obs)
+            if action_indices and 0 <= action_indices[0] < num_options:
+                return action_indices
+            return [0]
+
+        # 2. Boolean / Setup Decisions
         if sel_type == SelectType.YES_NO or ctx in (SelectContext.IS_FIRST, SelectContext.MULLIGAN, SelectContext.ACTIVATE, SelectContext.FIRST_EFFECT):
             return [0]
 
-        # AlphaZero MCTS Decision Making
-        encoder, model, mcts_engine = get_agent_components()
-        action_indices, probs = mcts_engine.get_action_distribution(obs)
+        # 3. Setup / Pokemon placement (Active / Bench / Switch)
+        if ctx in (SelectContext.SETUP_ACTIVE_POKEMON, SelectContext.SETUP_BENCH_POKEMON, SelectContext.TO_ACTIVE, SelectContext.TO_BENCH, SelectContext.SWITCH):
+            card_db = get_card_data_dict()
+            for idx, opt in enumerate(options):
+                cid = getattr(opt, 'cardId', None) if not isinstance(opt, dict) else opt.get('cardId')
+                if cid and cid in card_db:
+                    cdata = card_db[cid]
+                    if getattr(cdata, 'cardType', None) == 0 or getattr(cdata, 'basic', False):
+                        return [idx]
+            return [0]
 
-        # Validate returned action index
-        if action_indices and 0 <= action_indices[0] < num_options:
-            return action_indices
+        # 4. Count selection
+        if sel_type == SelectType.COUNT:
+            return [min_count] if min_count <= num_options else [0]
 
-        # Heuristic fallback if MCTS index is out of bounds
-        return [0]
+        # 5. Generic Option Filter (minCount == 0 -> Pass)
+        if min_count == 0:
+            return []
 
-    except Exception as err:
+        # Required multi-selection (minCount > 0)
+        k = min(min_count, num_options)
+        return list(range(k)) if k > 0 else []
+
+    except Exception:
         # Multi-layered Safe Fallback Guarantee
         try:
             select_info = obs_dict.get("select", {})
             opts = select_info.get("option", [])
             min_c = select_info.get("minCount", 0)
-            if not opts:
+            if not opts or min_c == 0:
                 return []
-            if min_c == 0:
-                return []
+            k = min(max(min_c, 1), len(opts))
+            return list(range(k))
+        except Exception:
+            return []
             return list(range(min(max(min_c, 1), len(opts))))
         except Exception:
             return []
