@@ -67,8 +67,9 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
         except Exception as e:
             print(f"Could not load weights ({e}), initializing fresh model.")
 
+    my_deck = read_deck_csv()
     deck_pool = load_deck_pool()
-    print(f"Loaded {len(deck_pool)} distinct 60-card decks in dev/deck_pool/")
+    print(f"Loaded {len(deck_pool)} distinct opponent 60-card decks in dev/deck_pool/")
 
     mcts_engine = AlphaZeroMCTS(model=model, encoder=encoder, num_simulations=num_simulations, device=device)
     experience_buffer: List[Tuple[torch.Tensor, np.ndarray, float]] = []
@@ -77,11 +78,19 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
     total_wins = 0
 
     for episode in range(1, num_episodes + 1):
-        # Pick 2 decks randomly from deck pool
-        d0 = random.choice(deck_pool)
-        d1 = random.choice(deck_pool)
+        # Player 0 (Our Agent) is FIXED to submit003 deck
+        # Player 1 (Opponent) is RANDOMLY SAMPLED from deck pool
+        opp_deck = random.choice(deck_pool)
         
-        print(f"\n--- Episode {episode}/{num_episodes} (Decks: {len(d0)} vs {len(d1)} cards) ---")
+        # Alternate going first vs going second
+        if episode % 2 == 1:
+            d0, d1 = my_deck, opp_deck
+            our_player_idx = 0
+        else:
+            d0, d1 = opp_deck, my_deck
+            our_player_idx = 1
+        
+        print(f"\n--- Episode {episode}/{num_episodes} (Our Agent: submit003 deck | Opponent Deck Pool Sample) ---")
         
         obs_dict, _ = battle_start(d0, d1)
         episode_experiences = []
@@ -93,7 +102,7 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
             if isinstance(obs_dict, dict) and obs_dict.get("is_finish"):
                 winner = obs_dict.get("winner", -1)
                 print(f"Match Finished! Turn {turn_count}, Winner: Player {winner}")
-                if winner == 0:
+                if winner == our_player_idx:
                     total_wins += 1
                 break
 
@@ -101,7 +110,7 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
             obs = to_observation_class(obs_dict)
 
             if obs.select is None:
-                action = deck3
+                action = my_deck
             else:
                 # 1. State Encoding
                 state_vec = encoder.encode(obs)

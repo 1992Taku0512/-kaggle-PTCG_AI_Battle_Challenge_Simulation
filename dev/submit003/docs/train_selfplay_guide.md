@@ -8,7 +8,7 @@
 
 `train_selfplay.py` は、以下の処理を自動的にループ実行します。
 
-1. **自己対戦 (Self-Play)**: `submit003` デッキを用いてAI同士を対戦させ、盤面状態（269次元テンソル）とMCTS探索結果のデータ（軌跡）を収集。
+1. **自己対戦 (Self-Play) & 対多様相手学習**: 自身のデッキを本番提出用の **`submit003/deck.csv` に固定**しつつ、対戦相手のデッキを `dev/deck_pool/`（10種類）からランダムに選出して対戦を周回。盤面状態（269次元テンソル）とMCTS探索結果のデータ（軌跡）を収集。
 2. **GPU重み更新 (Backpropagation)**: 収集した対戦軌跡データを RTX 2070 SUPER（`cuda`）に送り、`AlphaZeroNet`（Policy + Value Dual-Head ネットワーク）の重みを更新。
 3. **チェックポイント保存**: 更新された重みを `dev/submit003/model_weights.pt` に保存。
 4. **LINE通知**: 学習完了・勝率・経過時間を LINE ボットへ自動送信。
