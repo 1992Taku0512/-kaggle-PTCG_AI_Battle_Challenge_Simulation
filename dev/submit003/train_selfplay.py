@@ -27,10 +27,31 @@ from mcts import AlphaZeroMCTS
 from dev.submit003.main import agent as submit003_agent, read_deck_csv
 
 
+def load_deck_pool() -> List[List[int]]:
+    """Loads all 60-card decks from dev/deck_pool/."""
+    pool_dir = os.path.abspath(os.path.join(current_dir, "../deck_pool"))
+    decks = []
+    if os.path.exists(pool_dir):
+        for fname in sorted(os.listdir(pool_dir)):
+            if fname.endswith(".csv"):
+                fpath = os.path.join(pool_dir, fname)
+                try:
+                    with open(fpath, "r") as f:
+                        lines = [int(line.strip()) for line in f.read().strip().split("\n") if line.strip()]
+                    if len(lines) == 60:
+                        decks.append(lines)
+                except Exception:
+                    pass
+    if not decks:
+        decks.append(read_deck_csv())
+    return decks
+
+
 def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_size: int = 64, epochs_per_episode: int = 5):
-    """Self-Play & Reinforcement Learning Training Pipeline on RTX 2070 SUPER GPU."""
+    """Multi-Deck Multi-Opponent AlphaZero Training Pipeline on RTX 2070 SUPER GPU."""
+    import random
     print("=" * 60)
-    print("🚀 Starting AlphaZero Self-Play Training Loop on GPU")
+    print("🚀 Starting AlphaZero Multi-Deck Self-Play Training Loop on GPU")
     print("=" * 60)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,20 +67,21 @@ def train_self_play(num_episodes: int = 20, num_simulations: int = 30, batch_siz
         except Exception as e:
             print(f"Could not load weights ({e}), initializing fresh model.")
 
-    deck3 = read_deck_csv()
-    mcts_engine = AlphaZeroMCTS(model=model, encoder=encoder, num_simulations=num_simulations, device=device)
+    deck_pool = load_deck_pool()
+    print(f"Loaded {len(deck_pool)} distinct 60-card decks in dev/deck_pool/")
 
+    mcts_engine = AlphaZeroMCTS(model=model, encoder=encoder, num_simulations=num_simulations, device=device)
     experience_buffer: List[Tuple[torch.Tensor, np.ndarray, float]] = []
 
     start_time = time.time()
     total_wins = 0
 
     for episode in range(1, num_episodes + 1):
-        print(f"\n--- Episode {episode}/{num_episodes} ---")
+        # Pick 2 decks randomly from deck pool
+        d0 = random.choice(deck_pool)
+        d1 = random.choice(deck_pool)
         
-        # Alternate first and second player
-        swap_players = (episode % 2 == 0)
-        d0, d1 = (deck3, deck3)
+        print(f"\n--- Episode {episode}/{num_episodes} (Decks: {len(d0)} vs {len(d1)} cards) ---")
         
         obs_dict, _ = battle_start(d0, d1)
         episode_experiences = []
