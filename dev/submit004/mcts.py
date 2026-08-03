@@ -69,8 +69,8 @@ class AlphaZeroMCTS:
         # 13: ATTACK -> Highest Priority
         if type_val == 13:
             return 8.0
-        # 8: ATTACH (Energy) -> High Priority
-        elif type_val == 8:
+        # 5: ENERGY_CARD / 6: ENERGY / 8: ATTACH -> High Priority
+        elif type_val in (5, 6, 8):
             return 5.0
         # 7: PLAY (Item / Supporter / Basic Pokemon) / 9: EVOLVE / 10: ABILITY
         elif type_val in (7, 9, 10):
@@ -109,7 +109,7 @@ class AlphaZeroMCTS:
 
         # Check if there are active actions besides END TURN (14)
         has_active = any(
-            extract_option_type_val(opt) in (7, 8, 9, 10, 13)
+            extract_option_type_val(opt) in (5, 6, 7, 8, 9, 10, 13)
             for opt in options
         )
 
