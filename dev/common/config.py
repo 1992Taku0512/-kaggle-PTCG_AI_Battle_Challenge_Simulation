@@ -38,3 +38,4 @@ class TrainerConfig:
     
     use_line_notify: bool = True
     line_notify_every: int = 500
+    recent_winrate_window: int = 200  # Sliding window size for recent winrate calculation

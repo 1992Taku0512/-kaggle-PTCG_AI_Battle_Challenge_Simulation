@@ -8,3 +8,8 @@ submissions/
 .env
 *.zip
 samples/
+
+# Model Checkpoints & Large Weights
+checkpoints/
+**/checkpoints/
+*.pt
