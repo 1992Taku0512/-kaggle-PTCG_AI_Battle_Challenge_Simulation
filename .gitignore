@@ -8,3 +8,6 @@ submissions/
 .env
 *.zip
 samples/
+checkpoints/
+**/checkpoints/
+*.pt
