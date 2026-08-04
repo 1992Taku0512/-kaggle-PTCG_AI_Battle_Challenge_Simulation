@@ -55,7 +55,7 @@ class OpponentProvider:
                 ckpt_path = random.choice(self._past_checkpoints)
                 try:
                     opp_model = self.model_cls().to(self.device)
-                    ckpt = torch.load(ckpt_path, map_location=self.device)
+                    ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
                     state_dict = ckpt.get("model_state_dict", ckpt)
                     opp_model.load_state_dict(state_dict)
                     opp_model.eval()

@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import collections
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -93,6 +94,7 @@ class PTCGTrainer:
         
         self.start_episode = 1
         self.best_winrate = 0.0
+        self.recent_results = collections.deque(maxlen=self.config.recent_winrate_window)
         
         os.makedirs(self.config.checkpoint_dir, exist_ok=True)
         
@@ -107,7 +109,7 @@ class PTCGTrainer:
             return
 
         print(f"Loading checkpoint from: {abs_path}")
-        ckpt = torch.load(abs_path, map_location=self.device)
+        ckpt = torch.load(abs_path, map_location=self.device, weights_only=False)
         
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
             self.model.load_state_dict(ckpt["model_state_dict"])
@@ -195,6 +197,12 @@ class PTCGTrainer:
 
         while obs_dict is not None and turn_count < max_turns:
             turn_count += 1
+            if isinstance(obs_dict, dict) and "current" in obs_dict and isinstance(obs_dict["current"], dict):
+                res = obs_dict["current"].get("result", -1)
+                if res >= 0:
+                    winner = res
+                    break
+
             is_done, match_winner = check_match_finish(obs_dict)
             if is_done:
                 winner = match_winner
@@ -205,6 +213,11 @@ class PTCGTrainer:
 
             if obs.select is None:
                 action = d0 if current_player == 0 else d1
+            elif current_player == 1 and opp_model is None:
+                # RandomAgent opponent action
+                num_opts = len(obs.select.option)
+                max_cnt = min(obs.select.maxCount, num_opts)
+                action = random.sample(list(range(num_opts)), max_cnt) if num_opts > 0 else []
             else:
                 state_vec = self.encoder.encode(obs)
                 active_mcts = p1_mcts if current_player == 0 else p2_mcts
@@ -212,8 +225,12 @@ class PTCGTrainer:
                 action_list, _, policy_target = active_mcts.get_action_distribution(obs)
                 action = action_list
 
+                # Check if encoder supports SparseVector for Transformer models
+                sv_dec = self.encoder.encode_decoder(obs, d0 if current_player == 0 else d1) if hasattr(self.encoder, "encode_decoder") else None
+
                 episode_experiences.append({
                     "state": state_vec,
+                    "decoder_state": sv_dec,
                     "policy_target": policy_target,
                     "player": current_player,
                 })
@@ -223,13 +240,19 @@ class PTCGTrainer:
             except Exception:
                 break
 
+            if isinstance(obs_dict, dict) and "current" in obs_dict and isinstance(obs_dict["current"], dict):
+                res = obs_dict["current"].get("result", -1)
+                if res >= 0:
+                    winner = res
+                    break
+
         if obs_dict is not None and winner == -1:
             is_done, match_winner = check_match_finish(obs_dict)
             if is_done:
                 winner = match_winner
 
         if not episode_experiences:
-            return []
+            return [], winner
 
         # TD(lambda) backward smoothing for value targets
         final_value_p0 = 1.0 if winner == 0 else (-1.0 if winner == 1 else 0.0)
@@ -246,7 +269,7 @@ class PTCGTrainer:
                 running_value_p1 = running_value_p1 * self.config.td_lambda + target_val * (1.0 - self.config.td_lambda)
             exp["value_target"] = target_val
 
-        return episode_experiences
+        return episode_experiences, winner
 
     def update_model(self) -> float:
         """Performs mini-batch SGD update on the PyTorch neural network."""
@@ -254,7 +277,73 @@ class PTCGTrainer:
             return 0.0
 
         batch_samples = random.sample(self.experience_buffer, self.config.batch_size)
-        
+        first_sample = batch_samples[0]
+
+        # 1. SparseVector Transformer Model Update
+        if hasattr(first_sample["state"], "index"):
+            class LearnInput:
+                def __init__(self):
+                    self.index = []
+                    self.value = []
+                    self.offset = []
+
+                def add(self, sv):
+                    count = len(self.index)
+                    self.index.extend(sv.index)
+                    self.value.extend(sv.value)
+                    for o in sv.offset:
+                        self.offset.append(o + count)
+
+            input_enc = LearnInput()
+            input_dec = LearnInput()
+            value_labels = []
+            policy_labels = []
+            masks = []
+
+            for s in batch_samples:
+                input_enc.add(s["state"])
+                if s["decoder_state"] is not None:
+                    input_dec.add(s["decoder_state"])
+                value_labels.append(s["value_target"])
+
+                policy = list(s["policy_target"])[:64]
+                policy_labels.extend(policy)
+                for _ in range(len(policy)):
+                    masks.append(1.0)
+                num_pad = max(0, 64 - len(policy))
+                for _ in range(num_pad):
+                    masks.append(0.0)
+                    policy_labels.append(0.0)
+
+            idx_enc = torch.tensor(input_enc.index, dtype=torch.int64, device=self.device)
+            val_enc = torch.tensor(input_enc.value, dtype=torch.float32, device=self.device)
+            off_enc = torch.tensor(input_enc.offset, dtype=torch.int64, device=self.device)
+
+            idx_dec = torch.tensor(input_dec.index, dtype=torch.int64, device=self.device)
+            val_dec = torch.tensor(input_dec.value, dtype=torch.float32, device=self.device)
+            off_dec = torch.tensor(input_dec.offset, dtype=torch.int64, device=self.device)
+
+            label_v = torch.tensor(value_labels, dtype=torch.float32, device=self.device).unsqueeze(1)
+            label_p = torch.tensor(policy_labels, dtype=torch.float32, device=self.device).view(self.config.batch_size, -1)
+            mask_tensor = torch.tensor(masks, dtype=torch.float32, device=self.device).view(self.config.batch_size, -1)
+
+            self.model.train()
+            pred_v, pred_p = self.model(idx_enc, val_enc, off_enc, idx_dec, val_dec, off_dec)
+
+            loss_v = F.huber_loss(pred_v, label_v, delta=0.2)
+            loss_p = F.huber_loss(pred_p, label_p, reduction="none", delta=0.1)
+            valid_option_count = mask_tensor.sum()
+            loss_p = (loss_p * mask_tensor).sum() / (valid_option_count + 1e-8)
+
+            total_loss = loss_v + loss_p
+
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+
+            return total_loss.item()
+
+        # 2. Standard Dense Vector Model Update
         states = torch.tensor(np.array([s["state"] for s in batch_samples]), dtype=torch.float32, device=self.device)
         policy_targets = torch.tensor(np.array([s["policy_target"] for s in batch_samples]), dtype=torch.float32, device=self.device)
         value_targets = torch.tensor([[s["value_target"]] for s in batch_samples], dtype=torch.float32, device=self.device)
@@ -280,6 +369,18 @@ class PTCGTrainer:
         print(f"   Checkpoints Path: {self.config.checkpoint_dir}")
         print(f"================================================================================")
         
+        # Send Start LINE Notification
+        if self.config.use_line_notify:
+            start_msg = (
+                f"🚀 【学習開始通知】\n"
+                f"実験名: {self.config.experiment_name}\n"
+                f"• 学習規模: Ep {self.start_episode} -> Ep {self.config.num_episodes}\n"
+                f"• デッキ形式: P1({self.config.p1_deck_mode}) vs P2({self.config.p2_deck_mode})\n"
+                f"• MCTS探索数: {self.config.search_count}回/ターン\n"
+                f"• LINE通知: {self.config.line_notify_every}エピソードごと"
+            )
+            send_line_notification(start_msg)
+
         start_time = time.time()
         last_loss = 0.0
 
@@ -291,8 +392,11 @@ class PTCGTrainer:
             opp_type = self.opponent_provider.sample_opponent_type()
             opp_desc, opp_model = self.opponent_provider.get_opponent_model(opp_type, self.model)
 
-            # 2. Collect episode experiences
-            ep_samples = self.collect_self_play_episode(p1_deck, p2_deck, opp_model=opp_model)
+            # 2. Collect episode experiences & track winner
+            ep_samples, winner = self.collect_self_play_episode(p1_deck, p2_deck, opp_model=opp_model)
+            if winner >= 0:
+                self.recent_results.append(1.0 if winner == 0 else 0.0)
+
             self.experience_buffer.extend(ep_samples)
             if len(self.experience_buffer) > self.max_buffer_size:
                 self.experience_buffer = self.experience_buffer[-self.max_buffer_size:]
@@ -301,10 +405,12 @@ class PTCGTrainer:
             if len(self.experience_buffer) >= self.config.batch_size:
                 last_loss = self.update_model()
 
+            recent_wr = (sum(self.recent_results) / len(self.recent_results) * 100.0) if self.recent_results else 0.0
+
             # Logging info
             if ep % 50 == 0 or ep == 1:
                 elapsed = time.strftime("%H:%M:%S", time.gmtime(time.time() - start_time))
-                print(f"[Ep {ep:4d}/{self.config.num_episodes}] Elapsed: {elapsed} | Loss: {last_loss:.4f} | Decks: P1({p1_name}) vs P2({p2_name}) | Opp: {opp_desc}")
+                print(f"[Ep {ep:4d}/{self.config.num_episodes}] Elapsed: {elapsed} | Loss: {last_loss:.4f} | Recent {len(self.recent_results)}G Winrate: {recent_wr:.1f}% | Decks: P1({p1_name}) vs P2({p2_name}) | Opp: {opp_desc}")
 
             # 4. Checkpoint & Evaluation
             if ep % self.config.eval_every == 0 and agent_save_dir:
@@ -318,7 +424,7 @@ class PTCGTrainer:
                 eval_res = self.run_eval_subprocess(agent_save_dir)
                 wr = eval_res["winrate"]
                 turns = eval_res["avg_turns"]
-                print(f"-> Eval Result vs Sample: Winrate {wr:.1f}% ({eval_res['a1_wins']}/{self.config.eval_num_games}) | Avg Turns: {turns:.1f}\n")
+                print(f"-> Eval Result vs Sample: Winrate {wr:.1f}% ({eval_res['a1_wins']}/{self.config.eval_num_games}) | Recent {len(self.recent_results)}G Winrate: {recent_wr:.1f}% | Avg Turns: {turns:.1f}\n")
 
                 is_best = wr > self.best_winrate
                 if is_best:
@@ -329,11 +435,41 @@ class PTCGTrainer:
                 # LINE Notification
                 if self.config.use_line_notify and (ep % self.config.line_notify_every == 0 or is_best):
                     msg = (
-                        f"🏆 [{self.config.experiment_name}]\n"
+                        f"📊 [{self.config.experiment_name}]\n"
                         f"Episode: {ep}/{self.config.num_episodes}\n"
-                        f"Winrate: {wr:.1f}% ({'NEW BEST!' if is_best else f'Best: {self.best_winrate:.1f}%'})\n"
-                        f"Avg Turns: {turns:.1f} | Loss: {last_loss:.4f}"
+                        f"• 直近 {len(self.recent_results)} 試合勝率: {recent_wr:.1f}%\n"
+                        f"• 対サンプル勝率: {wr:.1f}% ({'NEW BEST!' if is_best else f'Best: {self.best_winrate:.1f}%'})\n"
+                        f"• 平均ターン数: {turns:.1f} | Loss: {last_loss:.4f}"
                     )
                     send_line_notification(msg)
 
         print(f"\n🎉 Training Successfully Completed for {self.config.experiment_name}!")
+
+        # 5. Post-Training Comprehensive Benchmark against Past Agents
+        if agent_save_dir:
+            print("\n" + "=" * 80)
+            print(f"🏁 Running Comprehensive Post-Training Benchmark for {self.config.experiment_name}")
+            print("=" * 80)
+
+            past_targets = [
+                ("Official Sample", "data/sample_submission/sample_submission"),
+                ("submit005 Agent", "dev/submit005"),
+                ("submit003 Agent", "dev/submit003"),
+                ("submit001 Agent", "dev/submit001"),
+            ]
+
+            summary_lines = []
+            for target_name, target_dir in past_targets:
+                if os.path.exists(os.path.join(project_root, target_dir)):
+                    res = self.run_eval_subprocess(agent_save_dir, target_dir)
+                    line_str = f"• vs {target_name}: 勝率 {res['winrate']:.1f}% ({res['a1_wins']}/{self.config.eval_num_games}) [平均 {res['avg_turns']:.1f}T]"
+                    summary_lines.append(line_str)
+                    print(line_str)
+
+            final_msg = (
+                f"🎉 【全1000エピソード完了・過去モデル総合対戦結果】\n"
+                f"実験名: {self.config.experiment_name}\n"
+                + "\n".join(summary_lines)
+            )
+            if self.config.use_line_notify:
+                send_line_notification(final_msg)
