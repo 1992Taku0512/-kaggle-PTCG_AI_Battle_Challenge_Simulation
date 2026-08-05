@@ -1,11 +1,25 @@
 import os
+import sys
 import random
 import torch
-from typing import List, Optional, Tuple, Callable
+from typing import List, Optional, Tuple, Callable, Any
+
+# Load sampleAgent001 agent function
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+
+sample_agent001_dir = os.path.join(project_root, "dev", "sampleAgent001")
+if sample_agent001_dir not in sys.path:
+    sys.path.insert(0, sample_agent001_dir)
+
+try:
+    import dev.sampleAgent001.main as sample_agent001_mod
+except ImportError:
+    sample_agent001_mod = None
 
 
 class OpponentProvider:
-    """Manages opponent sampling strategies for training (Self-Play, Random Agent, Past Checkpoints)."""
+    """Manages opponent sampling strategies for training (Self-Play, Random Agent, sampleAgent001, Past Checkpoints)."""
 
     def __init__(
         self,
@@ -39,14 +53,17 @@ class OpponentProvider:
             return "self_play"
         return random.choices(self.opponent_types, weights=self.opponent_weights, k=1)[0]
 
-    def get_opponent_model(self, opponent_type: str, current_model: torch.nn.Module) -> Tuple[str, Optional[torch.nn.Module]]:
-        """Returns the model instance to be used for P2/Opponent in a match."""
+    def get_opponent_model(self, opponent_type: str, current_model: torch.nn.Module) -> Tuple[str, Optional[Any]]:
+        """Returns the model or agent function instance to be used for P2/Opponent in a match."""
         if opponent_type == "self_play":
-            # Uses current model weights for self-play
             return "self_play", current_model
-        
-        elif opponent_type == "random":
-            # Pure random agent (no neural net required)
+
+        elif opponent_type == "sampleAgent001":
+            if sample_agent001_mod is not None and hasattr(sample_agent001_mod, "agent"):
+                return "sampleAgent001", sample_agent001_mod.agent
+            return "random", None
+
+        elif opponent_type in ("random", "official_sample"):
             return "random", None
 
         elif opponent_type == "past_checkpoint":
@@ -59,11 +76,8 @@ class OpponentProvider:
                     state_dict = ckpt.get("model_state_dict", ckpt)
                     opp_model.load_state_dict(state_dict)
                     opp_model.eval()
-                    return f"past_checkpoint:{os.path.basename(ckpt_path)}", opp_model
+                    return f"past_ckpt({os.path.basename(ckpt_path)})", opp_model
                 except Exception as e:
                     print(f"Warning: Failed to load opponent checkpoint {ckpt_path}: {e}")
-            
-            # Fallback to self_play if checkpoint loading fails
-            return "self_play", current_model
 
         return "self_play", current_model
