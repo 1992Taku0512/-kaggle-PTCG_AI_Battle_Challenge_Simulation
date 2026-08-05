@@ -161,13 +161,23 @@ class PTCGTrainer:
         clean_stdout = strip_ansi(res.stdout)
         
         a1_wins = 0
+        a2_wins = 0
+        draws = 0
         winrate = 0.0
         avg_turns = 0.0
 
-        match_wins = re.search(r"Agent 1.*?Wins\s+:\s+(\d+)\s+/\s+(\d+)\s+\(([\d.]+)%\)", clean_stdout, re.DOTALL)
-        if match_wins:
-            a1_wins = int(match_wins.group(1))
-            winrate = float(match_wins.group(3))
+        match_wins1 = re.search(r"Agent 1.*?Wins\s+:\s+(\d+)\s+/\s+(\d+)\s+\(([\d.]+)%\)", clean_stdout, re.DOTALL)
+        if match_wins1:
+            a1_wins = int(match_wins1.group(1))
+            winrate = float(match_wins1.group(3))
+
+        match_wins2 = re.search(r"Agent 2.*?Wins\s+:\s+(\d+)", clean_stdout)
+        if match_wins2:
+            a2_wins = int(match_wins2.group(1))
+
+        match_draws = re.search(r"Draws / Unfinished\s+:\s+(\d+)", clean_stdout)
+        if match_draws:
+            draws = int(match_draws.group(1))
 
         match_turns = re.search(r"Average Turn Count\s+:\s+([\d.]+)", clean_stdout)
         if match_turns:
@@ -175,6 +185,8 @@ class PTCGTrainer:
 
         return {
             "a1_wins": a1_wins,
+            "a2_wins": a2_wins,
+            "draws": draws,
             "winrate": winrate,
             "avg_turns": avg_turns,
             "raw_output": clean_stdout
@@ -187,7 +199,7 @@ class PTCGTrainer:
 
         # Instantiates MCTS engines
         p1_mcts = self.mcts_cls(model=self.model, encoder=self.encoder, num_simulations=self.config.search_count, device=self.device)
-        p2_mcts = self.mcts_cls(model=opp_model or self.model, encoder=self.encoder, num_simulations=self.config.search_count, device=self.device)
+        p2_mcts = self.mcts_cls(model=opp_model, encoder=self.encoder, num_simulations=self.config.search_count, device=self.device) if isinstance(opp_model, torch.nn.Module) else None
 
         obs_dict, _ = battle_start(d0, d1)
         turn_count = 0
@@ -211,33 +223,90 @@ class PTCGTrainer:
             current_player = extract_active_player(obs_dict)
             obs = to_observation_class(obs_dict)
 
-            if obs.select is None:
-                action = d0 if current_player == 0 else d1
+            if obs.select is None or not obs.select.option:
+                action = [0]
+            elif current_player == 1 and callable(opp_model):
+                # Rule-based agent function (e.g. sampleAgent001)
+                try:
+                    action = opp_model(obs_dict)
+                except Exception as e:
+                    num_opts = len(obs.select.option)
+                    min_cnt = max(1, getattr(obs.select, 'minCount', 1))
+                    action = list(range(min(min_cnt, num_opts)))
             elif current_player == 1 and opp_model is None:
                 # RandomAgent opponent action
                 num_opts = len(obs.select.option)
-                max_cnt = min(obs.select.maxCount, num_opts)
-                action = random.sample(list(range(num_opts)), max_cnt) if num_opts > 0 else []
+                min_cnt = max(1, getattr(obs.select, 'minCount', 1))
+                cnt = min(min_cnt, num_opts)
+                action = random.sample(list(range(num_opts)), cnt) if num_opts > 0 else [0]
             else:
                 state_vec = self.encoder.encode(obs)
-                active_mcts = p1_mcts if current_player == 0 else p2_mcts
+                active_mcts = p1_mcts if (current_player == 0 or p2_mcts is None) else p2_mcts
                 
-                action_list, _, policy_target = active_mcts.get_action_distribution(obs)
-                action = action_list
+                your_deck = d0 if current_player == 0 else d1
+                opp_deck = d1 if current_player == 0 else d0
+
+                action_list, _, policy_target = active_mcts.get_action_distribution(obs, your_deck=your_deck, opp_deck=opp_deck)
+                num_opts = len(obs.select.option)
+                min_cnt = max(1, getattr(obs.select, 'minCount', 1))
+                if isinstance(action_list, list) and len(action_list) >= min_cnt:
+                    action = action_list
+                else:
+                    action = list(range(min(min_cnt, num_opts)))
 
                 # Check if encoder supports SparseVector for Transformer models
                 sv_dec = self.encoder.encode_decoder(obs, d0 if current_player == 0 else d1) if hasattr(self.encoder, "encode_decoder") else None
+
+                # Step Reward calculation (Side changes, Evolution, Attacks)
+                step_reward = 0.0
+                if getattr(self.config, "use_intermediate_reward", False):
+                    try:
+                        p_idx = current_player
+                        opp_idx = 1 - current_player
+                        p_prizes_curr = getattr(obs, "prize", [3, 3])[p_idx] if hasattr(obs, "prize") and len(obs.prize) > p_idx else 3
+                        opp_prizes_curr = getattr(obs, "prize", [3, 3])[opp_idx] if hasattr(obs, "prize") and len(obs.prize) > opp_idx else 3
+                        
+                        # 1. Side take / lost
+                        if hasattr(self, "_prev_prizes"):
+                            p_taken = self._prev_prizes[opp_idx] - opp_prizes_curr
+                            p_lost = self._prev_prizes[p_idx] - p_prizes_curr
+                            if p_taken > 0:
+                                step_reward += p_taken * getattr(self.config, "reward_side_take", 0.3)
+                            if p_lost > 0:
+                                step_reward += p_lost * getattr(self.config, "reward_side_lost", -0.2)
+                        self._prev_prizes = {0: getattr(obs, "prize", [3, 3])[0] if hasattr(obs, "prize") else 3,
+                                             1: getattr(obs, "prize", [3, 3])[1] if hasattr(obs, "prize") else 3}
+
+                        # 2. Evolution & Attack Detection from obs options
+                        if obs.select and obs.select.option:
+                            for act_i in (action if isinstance(action, list) else [action]):
+                                if act_i < len(obs.select.option):
+                                    opt_str = str(obs.select.option[act_i]).lower()
+                                    # Attack declaration
+                                    if "attack" in opt_str or "waza" in opt_str:
+                                        step_reward += getattr(self.config, "reward_attack_use", 0.05)
+                                    # Evolution
+                                    if "evolve" in opt_str or "shinka" in opt_str or "121" in opt_str:
+                                        step_reward += getattr(self.config, "reward_stage2_evolve", 0.2)
+                                    elif "120" in opt_str:
+                                        step_reward += getattr(self.config, "reward_stage1_evolve", 0.1)
+                    except Exception:
+                        pass
 
                 episode_experiences.append({
                     "state": state_vec,
                     "decoder_state": sv_dec,
                     "policy_target": policy_target,
                     "player": current_player,
+                    "step_reward": step_reward,
                 })
 
             try:
                 obs_dict = battle_select(action)
-            except Exception:
+            except Exception as e:
+                import traceback
+                print(f"Warning: battle_select failed on turn {turn_count}: {e}")
+                traceback.print_exc()
                 break
 
             if isinstance(obs_dict, dict) and "current" in obs_dict and isinstance(obs_dict["current"], dict):
@@ -245,6 +314,9 @@ class PTCGTrainer:
                 if res >= 0:
                     winner = res
                     break
+
+        if hasattr(self, "_prev_prizes"):
+            del self._prev_prizes
 
         if obs_dict is not None and winner == -1:
             is_done, match_winner = check_match_finish(obs_dict)
@@ -254,18 +326,19 @@ class PTCGTrainer:
         if not episode_experiences:
             return [], winner
 
-        # TD(lambda) backward smoothing for value targets
+        # TD(lambda) backward smoothing for value targets with step rewards
         final_value_p0 = 1.0 if winner == 0 else (-1.0 if winner == 1 else 0.0)
         running_value_p0 = final_value_p0
         running_value_p1 = -final_value_p0
 
         for exp in reversed(episode_experiences):
             player = exp["player"]
+            step_r = exp.get("step_reward", 0.0)
             if player == 0:
-                target_val = running_value_p0
+                target_val = np.clip(running_value_p0 + step_r, -1.0, 1.0)
                 running_value_p0 = running_value_p0 * self.config.td_lambda + target_val * (1.0 - self.config.td_lambda)
             else:
-                target_val = running_value_p1
+                target_val = np.clip(running_value_p1 + (-step_r), -1.0, 1.0)
                 running_value_p1 = running_value_p1 * self.config.td_lambda + target_val * (1.0 - self.config.td_lambda)
             exp["value_target"] = target_val
 
@@ -394,8 +467,12 @@ class PTCGTrainer:
 
             # 2. Collect episode experiences & track winner
             ep_samples, winner = self.collect_self_play_episode(p1_deck, p2_deck, opp_model=opp_model)
-            if winner >= 0:
-                self.recent_results.append(1.0 if winner == 0 else 0.0)
+            if winner == 0:
+                self.recent_results.append("WIN")
+            elif winner == 1:
+                self.recent_results.append("LOSE")
+            else:
+                self.recent_results.append("DRAW")
 
             self.experience_buffer.extend(ep_samples)
             if len(self.experience_buffer) > self.max_buffer_size:
@@ -405,70 +482,73 @@ class PTCGTrainer:
             if len(self.experience_buffer) >= self.config.batch_size:
                 last_loss = self.update_model()
 
-            recent_wr = (sum(self.recent_results) / len(self.recent_results) * 100.0) if self.recent_results else 0.0
+            n_results = len(self.recent_results)
+            win_cnt = self.recent_results.count("WIN")
+            lose_cnt = self.recent_results.count("LOSE")
+            draw_cnt = self.recent_results.count("DRAW")
+            recent_wr = ((win_cnt + draw_cnt * 0.5) / n_results * 100.0) if n_results else 0.0
+            breakdown_str = f"WIN: {win_cnt}, LOSE: {lose_cnt}, DRAW: {draw_cnt}"
 
             # Logging info
             if ep % 50 == 0 or ep == 1:
                 elapsed = time.strftime("%H:%M:%S", time.gmtime(time.time() - start_time))
-                print(f"[Ep {ep:4d}/{self.config.num_episodes}] Elapsed: {elapsed} | Loss: {last_loss:.4f} | Recent {len(self.recent_results)}G Winrate: {recent_wr:.1f}% | Decks: P1({p1_name}) vs P2({p2_name}) | Opp: {opp_desc}")
+                print(f"[Ep {ep:4d}/{self.config.num_episodes}] Elapsed: {elapsed} | Loss: {last_loss:.4f} | Recent {n_results}G Winrate: {recent_wr:.1f}% ({breakdown_str}) | Decks: P1({p1_name}) vs P2({p2_name}) | Opp: {opp_desc}")
 
-            # 4. Checkpoint & Evaluation
-            if ep % self.config.eval_every == 0 and agent_save_dir:
-                print(f"\n📊 Running Evaluation Benchmark at Episode {ep}...")
-                
-                # Save latest model weights to agent directory for evaluation
-                if hasattr(self.model, "state_dict"):
-                    weights_dst = os.path.join(project_root, agent_save_dir, "model_weights.pt")
-                    torch.save(self.model.state_dict(), weights_dst)
+            # 4a. Standalone LINE Notification (no eval required)
+            if self.config.use_line_notify and ep % self.config.line_notify_every == 0:
+                elapsed = time.strftime("%H:%M:%S", time.gmtime(time.time() - start_time))
+                msg = (
+                    f"📊 [{self.config.experiment_name}]\n"
+                    f"Episode: {ep}/{self.config.num_episodes}\n"
+                    f"• 経過時間: {elapsed}\n"
+                    f"• 直近 {n_results} 試合勝率: {recent_wr:.1f}%\n"
+                    f"  ({breakdown_str})\n"
+                    f"• Loss: {last_loss:.4f}"
+                )
+                send_line_notification(msg)
 
-                eval_res = self.run_eval_subprocess(agent_save_dir)
-                wr = eval_res["winrate"]
-                turns = eval_res["avg_turns"]
-                print(f"-> Eval Result vs Sample: Winrate {wr:.1f}% ({eval_res['a1_wins']}/{self.config.eval_num_games}) | Recent {len(self.recent_results)}G Winrate: {recent_wr:.1f}% | Avg Turns: {turns:.1f}\n")
-
-                is_best = wr > self.best_winrate
-                if is_best:
-                    self.best_winrate = wr
-
-                self.save_checkpoint(ep, is_best=is_best)
-
-                # LINE Notification
-                if self.config.use_line_notify and (ep % self.config.line_notify_every == 0 or is_best):
-                    msg = (
-                        f"📊 [{self.config.experiment_name}]\n"
-                        f"Episode: {ep}/{self.config.num_episodes}\n"
-                        f"• 直近 {len(self.recent_results)} 試合勝率: {recent_wr:.1f}%\n"
-                        f"• 対サンプル勝率: {wr:.1f}% ({'NEW BEST!' if is_best else f'Best: {self.best_winrate:.1f}%'})\n"
-                        f"• 平均ターン数: {turns:.1f} | Loss: {last_loss:.4f}"
-                    )
-                    send_line_notification(msg)
+            # 4b. Periodic Checkpoint Saving
+            if ep % self.config.save_checkpoint_every == 0:
+                self.save_checkpoint(ep, is_best=False)
+                print(f"💾 Checkpoint saved at Episode {ep}")
 
         print(f"\n🎉 Training Successfully Completed for {self.config.experiment_name}!")
 
-        # 5. Post-Training Comprehensive Benchmark against Past Agents
+        # 5. Post-Training Comprehensive Benchmark against Past Agents & Sample (20 Games: 10 First / 10 Second)
         if agent_save_dir:
             print("\n" + "=" * 80)
-            print(f"🏁 Running Comprehensive Post-Training Benchmark for {self.config.experiment_name}")
+            print(f"🏁 Running 20-Game Benchmark (10 First / 10 Second) for {self.config.experiment_name}")
             print("=" * 80)
 
-            past_targets = [
+            # Save latest model weights to agent directory before benchmark
+            if hasattr(self.model, "state_dict"):
+                weights_dst = os.path.join(project_root, agent_save_dir, "model_weights.pt")
+                torch.save(self.model.state_dict(), weights_dst)
+
+            past_targets = getattr(self.config, "benchmark_targets", [
                 ("Official Sample", "data/sample_submission/sample_submission"),
-                ("submit005 Agent", "dev/submit005"),
-                ("submit003 Agent", "dev/submit003"),
                 ("submit001 Agent", "dev/submit001"),
-            ]
+                ("submit003 Agent", "dev/submit003"),
+                ("submit005 Agent", "dev/submit005"),
+            ])
 
             summary_lines = []
             for target_name, target_dir in past_targets:
                 if os.path.exists(os.path.join(project_root, target_dir)):
                     res = self.run_eval_subprocess(agent_save_dir, target_dir)
-                    line_str = f"• vs {target_name}: 勝率 {res['winrate']:.1f}% ({res['a1_wins']}/{self.config.eval_num_games}) [平均 {res['avg_turns']:.1f}T]"
+                    line_str = (
+                        f"• vs {target_name}: 勝率 {res['winrate']:.1f}%\n"
+                        f"  (WIN: {res['a1_wins']}, LOSE: {res['a2_wins']}, DRAW: {res['draws']}) [平均 {res['avg_turns']:.1f}T]"
+                    )
                     summary_lines.append(line_str)
-                    print(line_str)
+                    print(line_str.replace("\n  ", " "))
 
             final_msg = (
-                f"🎉 【全1000エピソード完了・過去モデル総合対戦結果】\n"
-                f"実験名: {self.config.experiment_name}\n"
+                f"🏁 【{self.config.experiment_name} 完走・20戦対局ベンチマーク結果】\n"
+                f"全 {self.config.num_episodes} エピソード学習完了！\n"
+                f"• 直近 {n_results} 試合自己対局勝率: {recent_wr:.1f}%\n"
+                f"  ({breakdown_str})\n\n"
+                f"【対過去モデル/サンプル 20戦成績 (先攻10/後攻10)】\n"
                 + "\n".join(summary_lines)
             )
             if self.config.use_line_notify:

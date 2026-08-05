@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -39,3 +39,20 @@ class TrainerConfig:
     use_line_notify: bool = True
     line_notify_every: int = 500
     recent_winrate_window: int = 200  # Sliding window size for recent winrate calculation
+
+    # 6. Post-Training Benchmark Targets
+    benchmark_targets: List[Tuple[str, str]] = field(default_factory=lambda: [
+        ("Official Sample", "data/sample_submission/sample_submission"),
+        ("submit001 Agent", "dev/submit001"),
+        ("submit003 Agent", "dev/submit003"),
+        ("submit005 Agent", "dev/submit005"),
+    ])
+
+    # 7. Intermediate Reward (Reward Shaping) Settings
+    use_intermediate_reward: bool = True
+    reward_side_take: float = 0.3      # Prize/Side take reward
+    reward_side_lost: float = -0.2     # Prize/Side lost penalty
+    reward_stage2_evolve: float = 0.2  # Dragapult ex evolution reward
+    reward_stage1_evolve: float = 0.1  # Drakloak evolution reward
+    reward_energy_attach: float = 0.05 # Energy attachment reward
+    reward_attack_use: float = 0.05    # Attack declaration reward
