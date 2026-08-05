@@ -8,7 +8,7 @@ submissions/
 .env
 *.zip
 samples/
-battlelog/*
+battlelog/
 # Model Checkpoints & Large Weights
 checkpoints/
 **/checkpoints/
