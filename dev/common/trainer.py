@@ -271,25 +271,47 @@ class PTCGTrainer:
                             p_taken = self._prev_prizes[opp_idx] - opp_prizes_curr
                             p_lost = self._prev_prizes[p_idx] - p_prizes_curr
                             if p_taken > 0:
-                                step_reward += p_taken * getattr(self.config, "reward_side_take", 0.3)
+                                step_reward += p_taken * getattr(self.config, "reward_side_take", 0.30)
                             if p_lost > 0:
-                                step_reward += p_lost * getattr(self.config, "reward_side_lost", -0.2)
+                                step_reward += p_lost * getattr(self.config, "reward_side_lost", -0.20)
                         self._prev_prizes = {0: getattr(obs, "prize", [3, 3])[0] if hasattr(obs, "prize") else 3,
                                              1: getattr(obs, "prize", [3, 3])[1] if hasattr(obs, "prize") else 3}
 
-                        # 2. Evolution & Attack Detection from obs options
+                        # 2. Action Specific Shaping (Reward Shaping v7)
                         if obs.select and obs.select.option:
+                            ps_curr = obs.player[p_idx] if hasattr(obs, "player") and len(obs.player) > p_idx else None
+                            deck_cnt = getattr(ps_curr, "deckCount", 60) if ps_curr else 60
+
                             for act_i in (action if isinstance(action, list) else [action]):
                                 if act_i < len(obs.select.option):
-                                    opt_str = str(obs.select.option[act_i]).lower()
-                                    # Attack declaration
-                                    if "attack" in opt_str or "waza" in opt_str:
-                                        step_reward += getattr(self.config, "reward_attack_use", 0.05)
-                                    # Evolution
-                                    if "evolve" in opt_str or "shinka" in opt_str or "121" in opt_str:
-                                        step_reward += getattr(self.config, "reward_stage2_evolve", 0.2)
-                                    elif "120" in opt_str:
-                                        step_reward += getattr(self.config, "reward_stage1_evolve", 0.1)
+                                    opt = obs.select.option[act_i]
+                                    opt_type = getattr(opt, 'type', None)
+                                    opt_str = str(opt).lower()
+
+                                    # Attack & Damage Scale Reward (Damage / 1000)
+                                    if "attack" in opt_str or opt_type == 12:
+                                        dmg = getattr(opt, 'damage', 0)
+                                        step_reward += max(0.01, dmg / 1000.0)
+
+                                    # Bench Expansion Bonus (+0.25)
+                                    elif "bench" in opt_str or opt_type in (1, 5) or ("play" in opt_str and getattr(obs, "turn", 0) <= 2):
+                                        step_reward += 0.25
+
+                                    # Energy Readiness Shaping (+0.05 Active when unready, +0.03 Bench when active ready)
+                                    elif "attach" in opt_str or opt_type == 8:
+                                        target_inplay = getattr(opt, 'inPlayIndex', 0)
+                                        target_energies = getattr(opt, 'energies', [])
+                                        if target_inplay == 0:  # Active spot
+                                            if len(target_energies) < 3:
+                                                step_reward += 0.05  # Active preparation bonus
+                                            elif len(target_energies) >= 5:
+                                                step_reward -= 0.05  # Over-concentration penalty (>5)
+                                        else:  # Bench spot
+                                            step_reward += 0.03  # Bench backup preparation bonus
+
+                                    # Danger zone draw penalty (-0.3 when deckCount <= 3)
+                                    if deck_cnt <= 3 and ("draw" in opt_str or "play" in opt_str):
+                                        step_reward -= 0.30
                     except Exception:
                         pass
 
@@ -326,8 +348,22 @@ class PTCGTrainer:
         if not episode_experiences:
             return [], winner
 
-        # TD(lambda) backward smoothing for value targets with step rewards
-        final_value_p0 = 1.0 if winner == 0 else (-1.0 if winner == 1 else 0.0)
+        # TD(lambda) backward smoothing
+        time_decay = max(0.5, 1.0 - (turn_count * 0.004))
+        
+        # Check if loss happened due to Deck-Out (LO) -> Apply heavy penalty (-2.0)
+        is_deck_out = False
+        if obs_dict and isinstance(obs_dict, dict):
+            reason = str(obs_dict.get("reason", "")).lower()
+            if "deck" in reason or "lo" in reason:
+                is_deck_out = True
+
+        if winner == 0:
+            final_value_p0 = 1.0 * time_decay
+        elif winner == 1:
+            final_value_p0 = -2.0 if is_deck_out else -1.0 * time_decay
+        else:
+            final_value_p0 = 0.0
         running_value_p0 = final_value_p0
         running_value_p1 = -final_value_p0
 

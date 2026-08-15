@@ -1,0 +1,12 @@
+Checkpoints: ['latest_model.pt', 'model_ep10000.pt', 'model_ep100000.pt', 'model_ep20000.pt', 'model_ep30000.pt', 'model_ep40000.pt', 'model_ep50000.pt', 'model_ep60000.pt', 'model_ep70000.pt', 'model_ep80000.pt', 'model_ep90000.pt']
+latest_model.pt          : 465.18 MB | Tue Aug 11 03:59:13 2026
+model_ep10000.pt         : 465.18 MB | Sun Aug  9 03:29:54 2026
+model_ep100000.pt        : 155.06 MB | Sun Aug  9 01:52:08 2026
+model_ep20000.pt         : 465.18 MB | Sun Aug  9 11:26:47 2026
+model_ep30000.pt         : 465.18 MB | Sun Aug  9 23:28:12 2026
+model_ep40000.pt         : 465.18 MB | Mon Aug 10 02:32:08 2026
+model_ep50000.pt         : 465.18 MB | Mon Aug 10 11:55:52 2026
+model_ep60000.pt         : 465.18 MB | Mon Aug 10 15:07:48 2026
+model_ep70000.pt         : 465.18 MB | Mon Aug 10 19:14:10 2026
+model_ep80000.pt         : 465.18 MB | Tue Aug 11 03:59:10 2026
+model_ep90000.pt         : 155.06 MB | Sun Aug  9 01:52:01 2026
