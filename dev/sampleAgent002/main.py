@@ -16,8 +16,10 @@ from cg.api import (
     to_observation_class
 )
 
-artifact_path = "deck.pkl"
-
+current_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+artifact_path = os.path.join(current_dir, "deck.pkl")
+if not os.path.exists(artifact_path):
+    artifact_path = "deck.pkl"
 if not os.path.exists(artifact_path):
     artifact_path = "/kaggle_simulations/agent/deck.pkl"
 
@@ -482,3 +484,15 @@ def agent(obs_dict: dict) -> list[int]:
             if card.id == Lunatone:
                 ability_used = True
     return desc_indices[:select.maxCount]
+
+
+def read_deck_csv() -> list[int]:
+    """Reads 60 card IDs from deck.csv or deck.pkl."""
+    deck_path = os.path.join(current_dir, "deck.csv")
+    if os.path.exists(deck_path):
+        with open(deck_path, "r", encoding="utf-8") as f:
+            lines = f.read().strip().split("\n")
+        cards = [int(line.strip()) for line in lines if line.strip() and not line.startswith("#")]
+        if len(cards) == 60:
+            return cards
+    return my_deck

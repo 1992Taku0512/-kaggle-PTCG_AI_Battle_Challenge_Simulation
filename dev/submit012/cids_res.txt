@@ -1,0 +1,9 @@
+Card ID  721 (Kyogre): FAILED
+Card ID  722 (Snover): FAILED
+Card ID 1158 (Maximum Belt): FAILED
+Card ID  723 (Mega Abomasnow ex): FAILED
+Card ID 1182 (Boss’s Orders): FAILED
+Card ID 1123 (Switch): FAILED
+Card ID 1121 (Ultra Ball): FAILED
+Card ID 1227 (Lillie's Determination): FAILED
+Card ID    3 (Basic {W} Energy): FAILED
